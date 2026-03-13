@@ -1,0 +1,20 @@
+[package]
+name = "zeta9"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.59", features = ["derive"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["default-tls"] }
+tokio = { version = "1.49.0", features = ["full"] }
+stun_codec_blazh= {version="0.1.13"}
+log = "0.4"
+simple_logger = "2.1"
+rand = "0.8.5"
+bytecodec = "0.4.15"
+serde = { version = "1.0.228", features = ["derive"] }
+async-trait = "0.1.89"
+anyhow = "1.0.102"
+bincode = "1"
+chrono = "0.4.44"
+stunclient = { version = "0.4.2", default-features = false, features = ["async"] }
