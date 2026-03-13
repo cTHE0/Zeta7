@@ -1,6 +1,6 @@
 use std::fmt;
 use tokio::net::UdpSocket;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use clap::{Parser, ValueEnum};
 use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
@@ -140,13 +140,3 @@ impl fmt::Display for Message {
     }
 }
 
-async fn get_public_ip(socket: &UdpSocket) -> Result<SocketAddr> {
-    let stun_addr = "stun.l.google.com:19302"
-        .to_socket_addrs()?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| anyhow::anyhow!("Cannot resolve STUN server"))?;
-
-    let client = stunclient::StunClient::new(stun_addr);
-    let public_addr = client.query_external_address_async(socket).await?;
-    Ok(public_addr)
-}

@@ -4,7 +4,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::{Opts, Message, UdpSocketExt, get_public_ip};
+use crate::{Opts, Message, UdpSocketExt};
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -14,19 +14,19 @@ pub async fn main_client(opts: Opts) {
     let relay_addr: SocketAddr = opts.relay_addr.expect("--relay-addr required")
         .parse().expect("Wrong address format");
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind"));
-    let public_addr: SocketAddr = get_public_ip(&socket).await.expect("Public IP not obtained.");
+    let local_addr = socket.local_addr().unwrap();
     let peer_id = opts.peer_id;
 
     // Enregistrement auprès du relai
     let msg = Message::Register {
-        src_addr: public_addr,
+        src_addr: local_addr,
         src_id: peer_id.clone(),
         dst_addr: relay_addr,
         dst_id: "relay".to_string(),
         time: now(),
     };
     socket.send_msg(&msg, relay_addr).await.unwrap();
-    println!("Connected as '{}' on {}", peer_id, public_addr);
+    println!("Connected as '{}'", peer_id);
 
     // Heartbeat : re-enregistrement toutes les 30s pour rester dans la liste du relai
     let socket_hb = Arc::clone(&socket);
@@ -35,7 +35,7 @@ pub async fn main_client(opts: Opts) {
         loop {
             sleep(Duration::from_secs(30)).await;
             let msg = Message::Register {
-                src_addr: public_addr,
+                src_addr: local_addr,
                 src_id: peer_id_hb.clone(),
                 dst_addr: relay_addr,
                 dst_id: "relay".to_string(),
@@ -65,7 +65,7 @@ pub async fn main_client(opts: Opts) {
     let mut lines = stdin.lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let msg = Message::Classic {
-            src_addr: public_addr,
+            src_addr: local_addr,
             src_id: peer_id.clone(),
             dst_addr: relay_addr,
             dst_id: "all".to_string(),
