@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{Message, UdpSocketExt, Opts};
+use crate::identity::{load_or_generate_keypair, sign, verify};
 
 type PeersMap = Arc<Mutex<HashMap<SocketAddr, (String, u64)>>>; // addr → (peer_id, last_seen)
 
@@ -54,6 +55,9 @@ pub async fn main_relay(opts: Opts) {
     let port_relay = 12345;
     let socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", port_relay)).await.expect("Failed to bind"));
     println!("Relay '{}' listening on port {}...", my_id, port_relay);
+
+    let signing_key = load_or_generate_keypair(&my_id);
+    let public_key = signing_key.verifying_key().to_bytes().to_vec();
 
     let peers_list: PeersMap = Arc::new(Mutex::new(HashMap::new()));
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(10_000)));
@@ -122,11 +126,17 @@ pub async fn main_relay(opts: Opts) {
                         println!("[+] '{}' registered ({})", src_id, sender_addr);
                     }
 
-                    if let Message::Classic { src_id, txt, msg_id, ttl, .. } = &msg {
+                    if let Message::Classic { src_id, txt, time, msg_id, ttl, public_key, signature, .. } = &msg {
                         // Déduplication : ignorer les messages déjà vus
                         if !seen_rx.lock().await.register(*msg_id) { continue; }
 
-                        println!("[{}] {}", src_id, txt);
+                        // Vérification de la signature
+                        if verify(public_key, src_id, txt, *time, *msg_id, signature) {
+                            println!("[{}] {}", src_id, txt);
+                        } else {
+                            eprintln!("[WARN] Message de '{}' — signature invalide, ignoré", src_id);
+                            continue;
+                        }
 
                         // Continuer à propager si le TTL n'est pas épuisé
                         if *ttl > 0 {
@@ -157,15 +167,19 @@ pub async fn main_relay(opts: Opts) {
     let mut lines = stdin.lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let msg_id: u64 = rand::random();
+        let time_val = now();
+        let sig = sign(&signing_key, &my_id, &line, time_val, msg_id);
         let msg = Message::Classic {
             src_addr: format!("0.0.0.0:{}", port_relay).parse().unwrap(),
             src_id: my_id.clone(),
             dst_addr: "0.0.0.0:0".parse().unwrap(),
             dst_id: "all".to_string(),
             txt: line,
-            time: now(),
+            time: time_val,
             msg_id,
             ttl: 16,
+            public_key: public_key.clone(),
+            signature: sig,
         };
         // Enregistrer ce msg_id pour ignorer les éventuels échos en retour
         seen_ids.lock().await.register(msg_id);

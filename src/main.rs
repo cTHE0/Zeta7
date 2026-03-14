@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use anyhow::Result;
 mod relay;
 mod client;
+mod identity;
 
 #[derive(Debug, Parser, Clone)]
 struct Opts {
@@ -67,8 +68,10 @@ pub enum Message {
         dst_id: String,
         txt: String,
         time: u64,
-        msg_id: u64,  // identifiant unique pour déduplication
-        ttl: u8,      // nombre de sauts restants avant abandon
+        msg_id: u64,      // identifiant unique pour déduplication
+        ttl: u8,          // nombre de sauts restants avant abandon
+        public_key: Vec<u8>,  // clé publique ED25519 de l'émetteur (32 bytes)
+        signature: Vec<u8>,   // signature ED25519 sur (src_id, txt, time, msg_id)
     },
 }
 
