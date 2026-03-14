@@ -1,13 +1,15 @@
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use ed25519_dalek::SigningKey;
 use crate::{Opts, Message, UdpSocketExt};
 use crate::identity::{load_or_generate_keypair, sign, verify, fingerprint};
-use crate::wallet::{load_or_generate_btc_key, btc_address, load_or_create_wallet, save_wallet, debit, credit, Wallet};
+use crate::wallet::{load_or_generate_btc_key, btc_address, load_or_create_wallet, save_wallet, debit, credit};
+use crate::app_state::{AppState, ChatMessage, SseEvent, UiCommand};
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -32,8 +34,29 @@ pub async fn main_client(opts: Opts) {
 
     // Chargement ou création du portefeuille local
     let wallet = Arc::new(Mutex::new(load_or_create_wallet(&peer_id, &address)));
+
     println!("Bitcoin address : {}", address);
     println!("Balance         : {} sats", wallet.lock().await.balance);
+
+    // Création de l'état partagé entre UI web et boucle P2P
+    let (events_tx, _) = broadcast::channel::<SseEvent>(256);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<UiCommand>(64);
+
+    let state = Arc::new(AppState {
+        node_id: peer_id.clone(),
+        fingerprint: my_fingerprint.clone(),
+        btc_address: address.clone(),
+        messages: RwLock::new(Vec::new()),
+        wallet: Arc::clone(&wallet),
+        events_tx,
+        cmd_tx,
+    });
+
+    // Démarrage du serveur web en arrière-plan
+    let state_web = Arc::clone(&state);
+    tokio::spawn(async move {
+        crate::web::start_server(state_web, 8080).await;
+    });
 
     // Enregistrement auprès du relai
     let msg = Message::Register {
@@ -44,10 +67,10 @@ pub async fn main_client(opts: Opts) {
         time: now(),
     };
     socket.send_msg(&msg, relay_addr).await.unwrap();
-    println!("Connected as '{}' (fingerprint: {})", peer_id, my_fingerprint);
-    println!("Commands: /pay <peer_id|fingerprint> <amount>  |  /balance");
+    println!("Connecté en tant que '{}' (empreinte: {})", peer_id, my_fingerprint);
+    println!("Commandes CLI : /pay <peer_id> <montant>  |  /balance");
 
-    // Heartbeat : re-enregistrement toutes les 30s pour rester dans la liste du relai
+    // Heartbeat : ré-enregistrement toutes les 30 s
     let socket_hb = Arc::clone(&socket);
     let peer_id_hb = peer_id.clone();
     tokio::spawn(async move {
@@ -68,61 +91,122 @@ pub async fn main_client(opts: Opts) {
     let socket_rx = Arc::clone(&socket);
     let peer_id_rx = peer_id.clone();
     let fingerprint_rx = my_fingerprint.clone();
-    let wallet_rx = Arc::clone(&wallet);
+    let state_rx = Arc::clone(&state);
     tokio::spawn(async move {
-        let mut buf = vec![0; 4096];
+        let mut buf = vec![0u8; 65535];
         loop {
             if let Ok((size, _)) = socket_rx.recv_from(&mut buf).await {
                 if let Ok(msg) = bincode::deserialize::<Message>(&buf[..size]) {
-                    handle_incoming(msg, &peer_id_rx, &fingerprint_rx, &socket_rx, relay_addr, &wallet_rx).await;
+                    handle_incoming(
+                        msg,
+                        &peer_id_rx,
+                        &fingerprint_rx,
+                        &socket_rx,
+                        relay_addr,
+                        &state_rx,
+                    ).await;
                 }
             }
         }
     });
 
-    // Boucle stdin : messages texte et commandes de paiement
+    // Boucle principale : stdin ET commandes web UI via cmd_rx
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.starts_with("/balance") {
-            let w = wallet.lock().await;
-            println!("Balance : {} sats  ({})", w.balance, w.address);
-        } else if let Some(args) = line.strip_prefix("/pay ") {
-            handle_pay_command(args, &peer_id, &socket, relay_addr, local_addr, &wallet).await;
-        } else {
-            // Message texte classique
-            let time_val = now();
-            let msg_id: u64 = rand::random();
-            let sig = sign(&signing_key, &peer_id, &line, time_val, msg_id);
-            let msg = Message::Classic {
-                src_addr: local_addr,
-                src_id: peer_id.clone(),
-                dst_addr: relay_addr,
-                dst_id: "all".to_string(),
-                txt: line,
-                time: time_val,
-                msg_id,
-                ttl: 16,
-                public_key: public_key.clone(),
-                signature: sig,
-            };
-            let _ = socket.send_msg(&msg, relay_addr).await;
+
+    loop {
+        tokio::select! {
+            // ── Entrée clavier ──
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(line)) if line.starts_with("/balance") => {
+                        let w = state.wallet.lock().await;
+                        println!("Balance : {} sats  ({})", w.balance, w.address);
+                    }
+                    Ok(Some(ref line)) if line.starts_with("/pay ") => {
+                        if let Some(args) = line.strip_prefix("/pay ") {
+                            handle_pay_command(
+                                args, &peer_id, &socket,
+                                relay_addr, local_addr, &state,
+                            ).await;
+                        }
+                    }
+                    Ok(Some(line)) => {
+                        send_classic_message(
+                            &line, &peer_id, &socket, relay_addr,
+                            local_addr, &signing_key, &public_key,
+                        ).await;
+                    }
+                    _ => break,
+                }
+            }
+            // ── Commandes depuis l'interface web ──
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(UiCommand::SendMessage(text)) => {
+                        send_classic_message(
+                            &text, &peer_id, &socket, relay_addr,
+                            local_addr, &signing_key, &public_key,
+                        ).await;
+                    }
+                    Some(UiCommand::Pay { dst_id, amount }) => {
+                        let args = format!("{} {}", dst_id, amount);
+                        handle_pay_command(
+                            &args, &peer_id, &socket,
+                            relay_addr, local_addr, &state,
+                        ).await;
+                    }
+                    None => break,
+                }
+            }
         }
     }
 }
 
-// Envoie un paiement : débite le wallet et envoie un message Payment au relai.
+// ────────────────────────────────────────────────────────────
+// Envoi d'un message Classic signé
+// ────────────────────────────────────────────────────────────
+async fn send_classic_message(
+    text: &str,
+    peer_id: &str,
+    socket: &UdpSocket,
+    relay_addr: SocketAddr,
+    local_addr: SocketAddr,
+    signing_key: &SigningKey,
+    public_key: &[u8],
+) {
+    let time_val = now();
+    let msg_id: u64 = rand::random();
+    let sig = sign(signing_key, peer_id, text, time_val, msg_id);
+    let msg = Message::Classic {
+        src_addr: local_addr,
+        src_id: peer_id.to_string(),
+        dst_addr: relay_addr,
+        dst_id: "all".to_string(),
+        txt: text.to_string(),
+        time: time_val,
+        msg_id,
+        ttl: 16,
+        public_key: public_key.to_vec(),
+        signature: sig,
+    };
+    let _ = socket.send_msg(&msg, relay_addr).await;
+}
+
+// ────────────────────────────────────────────────────────────
+// Envoi d'un paiement
+// ────────────────────────────────────────────────────────────
 async fn handle_pay_command(
     args: &str,
     my_id: &str,
     socket: &UdpSocket,
     relay_addr: SocketAddr,
     _local_addr: SocketAddr,
-    wallet: &Arc<Mutex<Wallet>>,
+    state: &Arc<AppState>,
 ) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() != 2 {
-        eprintln!("Usage: /pay <peer_id> <amount>");
+        eprintln!("Usage: /pay <peer_id> <montant>");
         return;
     }
     let dst_id = parts[0].trim();
@@ -135,13 +219,14 @@ async fn handle_pay_command(
         return;
     }
 
-    let mut w = wallet.lock().await;
-    if !debit(&mut w, amount) {
-        eprintln!("Solde insuffisant ({} sats)", w.balance);
-        return;
+    {
+        let mut w = state.wallet.lock().await;
+        if !debit(&mut w, amount) {
+            eprintln!("Solde insuffisant ({} sats)", w.balance);
+            return;
+        }
+        save_wallet(my_id, &w);
     }
-    save_wallet(my_id, &w);
-    drop(w);
 
     let payment_id: u64 = rand::random();
     let msg = Message::Payment {
@@ -151,46 +236,76 @@ async fn handle_pay_command(
         payment_id,
     };
     match socket.send_msg(&msg, relay_addr).await {
-        Ok(_) => println!("[Payment #{payment_id}] {amount} sats envoyés à {dst_id} (en attente de confirmation)"),
+        Ok(_) => {
+            println!("[Payment #{payment_id}] {amount} sats envoyés à {dst_id} (en attente de confirmation)");
+            // Ajouter l'événement dans le fil UI
+            state.push_message(ChatMessage {
+                from_id: dst_id.to_string(),
+                fingerprint: String::new(),
+                text: amount.to_string(),
+                timestamp: now(),
+                msg_type: "payment_sent".to_string(),
+            }).await;
+            state.broadcast_wallet_update().await;
+        }
         Err(e) => {
             eprintln!("Erreur d'envoi : {}", e);
             // Recréditer en cas d'échec réseau
-            wallet.lock().await.balance += amount;
+            let mut w = state.wallet.lock().await;
+            w.balance += amount;
+            save_wallet(my_id, &w);
         }
     }
 }
 
-// Traite un message entrant (Classic, Payment, PaymentAck).
+// ────────────────────────────────────────────────────────────
+// Traitement des messages entrants
+// ────────────────────────────────────────────────────────────
 async fn handle_incoming(
     msg: Message,
     my_id: &str,
     my_fingerprint: &str,
     socket: &UdpSocket,
     relay_addr: SocketAddr,
-    wallet: &Arc<Mutex<Wallet>>,
+    state: &Arc<AppState>,
 ) {
     match msg {
         Message::Classic { src_id, txt, time, msg_id, public_key, signature, .. } => {
             if verify(&public_key, &src_id, &txt, time, msg_id, &signature) {
-                println!("[{} - {}] {}", src_id, fingerprint(&public_key), txt);
+                let fp = fingerprint(&public_key);
+                println!("[{} - {}] {}", src_id, fp, txt);
+                state.push_message(ChatMessage {
+                    from_id: src_id,
+                    fingerprint: fp,
+                    text: txt,
+                    timestamp: time,
+                    msg_type: "message".to_string(),
+                }).await;
             } else {
                 eprintln!("[WARN] Message de '{}' — signature invalide, ignoré", src_id);
             }
         }
 
         Message::Payment { src_id, dst_id, amount, payment_id } => {
-            // Accepter si dst_id correspond au peer_id ou au fingerprint
             if dst_id != my_id && dst_id != my_fingerprint {
                 return;
             }
-            // Créditer le wallet
-            let mut w = wallet.lock().await;
-            credit(&mut w, amount);
-            println!("[Payment #{payment_id}] +{amount} sats reçus de {src_id} (balance: {} sats)", w.balance);
-            save_wallet(my_id, &w);
-            drop(w);
+            {
+                let mut w = state.wallet.lock().await;
+                credit(&mut w, amount);
+                println!("[Payment #{payment_id}] +{amount} sats reçus de {src_id} (balance: {} sats)", w.balance);
+                save_wallet(my_id, &w);
+            }
+            state.push_message(ChatMessage {
+                from_id: src_id.clone(),
+                fingerprint: String::new(),
+                text: amount.to_string(),
+                timestamp: now(),
+                msg_type: "payment_received".to_string(),
+            }).await;
+            state.broadcast_wallet_update().await;
 
-            // Envoyer un accusé de réception
+            // Accusé de réception
             let ack = Message::PaymentAck {
                 payment_id,
                 from_id: my_id.to_string(),
@@ -203,10 +318,18 @@ async fn handle_incoming(
             if to_id != my_id && to_id != my_fingerprint {
                 return;
             }
-            // Sauvegarder l'état du wallet après confirmation
-            let w = wallet.lock().await;
-            save_wallet(my_id, &w);
-            println!("[Payment #{payment_id}] Paiement confirmé par {from_id} (balance: {} sats)", w.balance);
+            {
+                let w = state.wallet.lock().await;
+                save_wallet(my_id, &w);
+                println!("[Payment #{payment_id}] Confirmé par {from_id} (balance: {} sats)", w.balance);
+            }
+            state.push_message(ChatMessage {
+                from_id: from_id.clone(),
+                fingerprint: String::new(),
+                text: String::new(),
+                timestamp: now(),
+                msg_type: "payment_ack".to_string(),
+            }).await;
         }
 
         _ => {}

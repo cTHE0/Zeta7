@@ -9,6 +9,8 @@ mod relay;
 mod client;
 pub mod identity;
 pub mod wallet;
+pub mod app_state;
+mod web;
 
 #[derive(Debug, Parser, Clone)]
 struct Opts {
