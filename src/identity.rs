@@ -1,7 +1,12 @@
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
 use rand::rngs::OsRng;
 
-// Charge la clé depuis ./zeta9_identity ou en génère une nouvelle.
+// Retourne les 8 premiers bytes de la clé publique en hexadécimal (fingerprint court).
+pub fn fingerprint(public_key: &[u8]) -> String {
+    public_key.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+}
+
+// Charge la clé depuis ./{peer_id}_identity ou en génère une nouvelle.
 pub fn load_or_generate_keypair(peer_id: &str) -> SigningKey {
     let path = format!("./{}_identity", peer_id);
     if let Ok(bytes) = std::fs::read(&path) {

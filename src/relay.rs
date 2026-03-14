@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{Message, UdpSocketExt, Opts};
-use crate::identity::{load_or_generate_keypair, sign, verify};
+use crate::identity::{load_or_generate_keypair, sign, verify, fingerprint};
 
 type PeersMap = Arc<Mutex<HashMap<SocketAddr, (String, u64)>>>; // addr → (peer_id, last_seen)
 
@@ -132,7 +132,7 @@ pub async fn main_relay(opts: Opts) {
 
                         // Vérification de la signature
                         if verify(public_key, src_id, txt, *time, *msg_id, signature) {
-                            println!("[{}] {}", src_id, txt);
+                            println!("[{} - {}] {}", src_id, fingerprint(public_key), txt);
                         } else {
                             eprintln!("[WARN] Message de '{}' — signature invalide, ignoré", src_id);
                             continue;

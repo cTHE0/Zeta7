@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{Opts, Message, UdpSocketExt};
-use crate::identity::{load_or_generate_keypair, sign, verify};
+use crate::identity::{load_or_generate_keypair, sign, verify, fingerprint};
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -59,7 +59,7 @@ pub async fn main_client(opts: Opts) {
                 if let Ok(msg) = bincode::deserialize::<Message>(&buf[..size]) {
                     if let Message::Classic { src_id, txt, time, msg_id, public_key, signature, .. } = msg {
                         if verify(&public_key, &src_id, &txt, time, msg_id, &signature) {
-                            println!("[{}] {}", src_id, txt);
+                            println!("[{} - {}] {}", src_id, fingerprint(&public_key), txt);
                         } else {
                             eprintln!("[WARN] Message de '{}' — signature invalide, ignoré", src_id);
                         }
