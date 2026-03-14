@@ -23,6 +23,7 @@ pub async fn main_client(opts: Opts) {
     // Chargement ou génération du couple de clés ed25519 (identité/signature)
     let signing_key = load_or_generate_keypair(&peer_id);
     let public_key = signing_key.verifying_key().to_bytes().to_vec();
+    let my_fingerprint = fingerprint(&public_key);
 
     // Chargement ou génération du keypair secp256k1 (convention Bitcoin, paiements)
     let btc_key = load_or_generate_btc_key(&peer_id);
@@ -43,8 +44,8 @@ pub async fn main_client(opts: Opts) {
         time: now(),
     };
     socket.send_msg(&msg, relay_addr).await.unwrap();
-    println!("Connected as '{}'", peer_id);
-    println!("Commands: /pay <peer_id> <amount>  |  /balance");
+    println!("Connected as '{}' (fingerprint: {})", peer_id, my_fingerprint);
+    println!("Commands: /pay <peer_id|fingerprint> <amount>  |  /balance");
 
     // Heartbeat : re-enregistrement toutes les 30s pour rester dans la liste du relai
     let socket_hb = Arc::clone(&socket);
@@ -66,13 +67,14 @@ pub async fn main_client(opts: Opts) {
     // Réception des messages en arrière-plan
     let socket_rx = Arc::clone(&socket);
     let peer_id_rx = peer_id.clone();
+    let fingerprint_rx = my_fingerprint.clone();
     let wallet_rx = Arc::clone(&wallet);
     tokio::spawn(async move {
         let mut buf = vec![0; 4096];
         loop {
             if let Ok((size, _)) = socket_rx.recv_from(&mut buf).await {
                 if let Ok(msg) = bincode::deserialize::<Message>(&buf[..size]) {
-                    handle_incoming(msg, &peer_id_rx, &socket_rx, relay_addr, &wallet_rx).await;
+                    handle_incoming(msg, &peer_id_rx, &fingerprint_rx, &socket_rx, relay_addr, &wallet_rx).await;
                 }
             }
         }
@@ -162,6 +164,7 @@ async fn handle_pay_command(
 async fn handle_incoming(
     msg: Message,
     my_id: &str,
+    my_fingerprint: &str,
     socket: &UdpSocket,
     relay_addr: SocketAddr,
     wallet: &Arc<Mutex<Wallet>>,
@@ -176,8 +179,9 @@ async fn handle_incoming(
         }
 
         Message::Payment { src_id, dst_id, amount, payment_id } => {
-            if dst_id != my_id {
-                return; // Pas pour moi
+            // Accepter si dst_id correspond au peer_id ou au fingerprint
+            if dst_id != my_id && dst_id != my_fingerprint {
+                return;
             }
             // Créditer le wallet
             let mut w = wallet.lock().await;
@@ -196,8 +200,8 @@ async fn handle_incoming(
         }
 
         Message::PaymentAck { payment_id, from_id, to_id } => {
-            if to_id != my_id {
-                return; // Pas pour moi
+            if to_id != my_id && to_id != my_fingerprint {
+                return;
             }
             // Sauvegarder l'état du wallet après confirmation
             let w = wallet.lock().await;
