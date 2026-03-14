@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use anyhow::Result;
 mod relay;
 mod client;
-mod identity;
+pub mod identity;
+pub mod wallet;
 
 #[derive(Debug, Parser, Clone)]
 struct Opts {
@@ -68,10 +69,23 @@ pub enum Message {
         dst_id: String,
         txt: String,
         time: u64,
-        msg_id: u64,      // identifiant unique pour déduplication
-        ttl: u8,          // nombre de sauts restants avant abandon
-        public_key: Vec<u8>,  // clé publique ED25519 de l'émetteur (32 bytes)
-        signature: Vec<u8>,   // signature ED25519 sur (src_id, txt, time, msg_id)
+        msg_id: u64,  // identifiant unique pour déduplication
+        ttl: u8,      // nombre de sauts restants avant abandon
+        public_key: Vec<u8>,
+        signature: Vec<u8>,
+    },
+
+    Payment {  // Peer → Peer : envoi d'une somme
+        src_id: String,
+        dst_id: String,
+        amount: u64,
+        payment_id: u64,
+    },
+
+    PaymentAck {  // Peer → Peer : confirmation de réception d'un paiement
+        payment_id: u64,
+        from_id: String,  // celui qui confirme (destinataire du paiement)
+        to_id: String,    // celui qui a envoyé le paiement
     },
 }
 
@@ -138,6 +152,12 @@ impl fmt::Display for Message {
                     .map(|dt| dt.format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| format!("t={}", time));
                 write!(f, "[{} ({}) → {} ({})] \"{}\" ({})", src_addr, src_id, dst_addr, dst_id, txt, time_str)
+            }
+            Message::Payment { src_id, dst_id, amount, payment_id } => {
+                write!(f, "[Payment #{}] {} → {} : {} sats", payment_id, src_id, dst_id, amount)
+            }
+            Message::PaymentAck { payment_id, from_id, to_id } => {
+                write!(f, "[PaymentAck #{}] {} confirmed reception (to {})", payment_id, from_id, to_id)
             }
         }
     }

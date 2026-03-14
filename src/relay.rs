@@ -146,6 +146,16 @@ pub async fn main_relay(opts: Opts) {
                         }
                     }
 
+                    if let Message::Payment { src_id, dst_id, amount, payment_id } = &msg {
+                        println!("[Payment #{payment_id}] {src_id} → {dst_id} : {amount} sats");
+                        relay_message(&peers_rx, sender_addr, msg.clone(), &socket_rx).await;
+                    }
+
+                    if let Message::PaymentAck { payment_id, from_id, to_id } = &msg {
+                        println!("[PaymentAck #{payment_id}] {from_id} → {to_id}");
+                        relay_message(&peers_rx, sender_addr, msg.clone(), &socket_rx).await;
+                    }
+
                     if let Message::AskForAddr { src_addr, peer_id, .. } = &msg {
                         let map = peers_rx.lock().await;
                         if let Some((found_addr, _)) = map.iter().find(|(_, (id, _))| id == peer_id) {
