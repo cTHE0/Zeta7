@@ -1,7 +1,6 @@
 use k256::{SecretKey, PublicKey};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use sha2::{Sha256, Digest};
-use ripemd::Ripemd160;
+use bitcoin_hashes::{Hash, hash160, sha256d};
 use rand::rngs::OsRng;
 use serde::{Serialize, Deserialize};
 
@@ -27,22 +26,24 @@ pub fn load_or_generate_btc_key(peer_id: &str) -> SecretKey {
 }
 
 // Dérive une adresse P2PKH Bitcoin à partir d'une clé publique secp256k1.
-// Algorithme : Base58Check( 0x00 || RIPEMD160(SHA256(pubkey_compressée)) )
+// Algorithme : Base58Check( 0x00 || hash160(pubkey_compressée) )
+// hash160 = RIPEMD160(SHA256(pubkey))
 pub fn btc_address(pubkey: &PublicKey) -> String {
     let encoded = pubkey.to_encoded_point(true);
     let compressed_bytes = encoded.as_bytes();
 
-    let sha256_result = Sha256::digest(compressed_bytes);
-    let hash160 = Ripemd160::digest(&sha256_result);
+    // hash160 : RIPEMD160(SHA256(pubkey))
+    let h160 = hash160::Hash::hash(compressed_bytes);
+    let h160_bytes = h160.to_byte_array();
 
-    // Payload : version byte (0x00 mainnet) + hash160
+    // Payload : version byte mainnet (0x00) + hash160
     let mut payload = Vec::with_capacity(25);
     payload.push(0x00u8);
-    payload.extend_from_slice(&hash160);
+    payload.extend_from_slice(&h160_bytes);
 
-    // Checksum : 4 premiers bytes du double-SHA256
-    let checksum = Sha256::digest(Sha256::digest(&payload));
-    payload.extend_from_slice(&checksum[..4]);
+    // Checksum : 4 premiers bytes de SHA256(SHA256(payload))
+    let checksum = sha256d::Hash::hash(&payload);
+    payload.extend_from_slice(&checksum.to_byte_array()[..4]);
 
     bs58::encode(payload).into_string()
 }
