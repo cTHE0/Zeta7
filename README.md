@@ -34,11 +34,19 @@ cargo build --release
 cargo run --release -- --mode client --peer-id <ton_nom> --relay-addr <ip_relai>:12345
 ```
 
-**Exemple :**
+**Exemple (un seul relai) :**
 
 ```bash
 cargo run --release -- --mode client --peer-id alice --relay-addr 51.159.0.1:12345
 ```
+
+**Exemple (plusieurs relais, comma-séparés) :**
+
+```bash
+cargo run --release -- --mode client --peer-id alice --relay-addr 51.159.0.1:12345,51.159.0.2:12345
+```
+
+Connecter un client à plusieurs relais augmente la portée et la redondance : les messages envoyés sont diffusés sur tous les relais simultanément, et les messages reçus en double (via plusieurs relais) sont automatiquement dédupliqués.
 
 L'interface web démarre automatiquement sur **http://127.0.0.1:8080** — ouvre-la dans ton navigateur.
 
@@ -93,11 +101,15 @@ Bonjour tout le monde   → diffuse un message signé
 ## Architecture
 
 ```
-[Alice]  ──── Register / Classic / Payment ────→  [Relai]  ────→  [Bob]
-                                                      │
-                                               Broadcast (TTL 16)
-                                               Vérification signature
+[Alice] ──── Register / Classic / Payment ────→ [Relai A] ─── fédération ───→ [Relai B]
+   │                                                  │                              │
+   └──── Register / Classic / Payment ───────────────┘                          [Bob]
+                                              Broadcast (TTL 16)
+                                              Vérification signature
 ```
+
+Un client peut se connecter à plusieurs relais simultanément (option `--relay-addr` comma-séparée).
+Les relais peuvent eux-mêmes se fédérer entre eux (`--peer-relays`).
 
 - Messages signés **Ed25519** — le relai vérifie avant de retransmettre.
 - Paiements relayés en UDP ; le destinataire répond par un `PaymentAck`.

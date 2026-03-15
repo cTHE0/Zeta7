@@ -20,8 +20,8 @@ struct Opts {
     #[arg(long)]
     peer_id: String,
 
-    // Adresse du relai qui va permettre de connecter les noeuds (au moins au début)
-    #[arg(long, required_if_eq("mode", "client"), help("--relay-addr 1.2.3.4:5678"))]
+    // Liste des relais (virgule-séparée) auxquels le client doit se connecter
+    #[arg(long, required_if_eq("mode", "client"), help("--relay-addr 1.2.3.4:5678,9.10.11.12:5678"))]
     relay_addr: Option<String>,
 
     // Liste des autres relais (virgule-séparée) avec lesquels ce relay doit se fédérer
