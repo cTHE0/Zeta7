@@ -20,7 +20,7 @@ pub fn load_or_generate_btc_key(peer_id: &str) -> SecretKey {
         }
     }
     let key = SecretKey::random(&mut OsRng);
-    std::fs::write(&path, key.to_bytes().as_slice()).expect("Cannot save btc key");
+    std::fs::write(&path, &key.to_bytes()).expect("Cannot save btc key");
     println!("New Bitcoin keypair generated → {}", path);
     key
 }
