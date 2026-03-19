@@ -174,7 +174,7 @@ input::placeholder{color:var(--text3)}
     <div class="card">
       <div class="card-hd">Envoyer des sats</div>
       <div class="fgrp">
-        <input type="text" id="pay-to" placeholder="Peer ID ou empreinte"/>
+        <input type="text" id="pay-to" placeholder="Adresse Bitcoin du destinataire"/>
       </div>
       <div class="fgrp">
         <input type="number" id="pay-amt" placeholder="Montant (sats)" min="1"/>

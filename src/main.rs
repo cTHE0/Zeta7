@@ -43,6 +43,7 @@ pub enum Message {
         dst_addr: SocketAddr,
         dst_id: String,
         time: u64,
+        btc_address: Option<String>,  // Adresse Bitcoin du peer (None pour les relays)
     },
 
     Connect {  // Dial → Relay : "Mets-moi en contact avec ce peer_id"
@@ -128,11 +129,12 @@ impl UdpSocketExt for UdpSocket {
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Message::Register { src_addr, src_id, dst_addr, dst_id, time } => {
+            Message::Register { src_addr, src_id, dst_addr, dst_id, time, btc_address } => {
                 let time_str = DateTime::<Utc>::from_timestamp(*time as i64, 0)
                     .map(|dt| dt.format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| format!("t={}", time));
-                write!(f, "[Register] {} ({}) → {} ({}) ({})", src_addr, src_id, dst_addr, dst_id, time_str)
+                let btc = btc_address.as_ref().map(|s| format!(" [{}]", s)).unwrap_or_default();
+                write!(f, "[Register] {} ({}) → {} ({}){} ({})", src_addr, src_id, dst_addr, dst_id, btc, time_str)
             }
             Message::Connect { src_addr, src_id, dst_id, time } => {
                 let time_str = DateTime::<Utc>::from_timestamp(*time as i64, 0)

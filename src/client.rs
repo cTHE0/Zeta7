@@ -96,16 +96,18 @@ pub async fn main_client(opts: Opts) {
             dst_addr: relay_addr,
             dst_id: "relay".to_string(),
             time: now(),
+            btc_address: Some(address.clone()),
         };
         socket.send_msg(&msg, relay_addr).await.unwrap();
     }
     println!("Connecté en tant que '{}' (empreinte: {}) auprès de {} relai(s)",
              peer_id, my_fingerprint, relay_addrs.len());
-    println!("Commandes CLI : /pay <peer_id> <montant>  |  /balance");
+    println!("Commandes CLI : /pay <adresse_bitcoin> <montant>  |  /balance");
 
     // Heartbeat : ré-enregistrement toutes les 30 s auprès de tous les relais
     let socket_hb = Arc::clone(&socket);
     let peer_id_hb = peer_id.clone();
+    let address_hb = address.clone();
     let relay_addrs_hb = relay_addrs.clone();
     tokio::spawn(async move {
         loop {
@@ -117,6 +119,7 @@ pub async fn main_client(opts: Opts) {
                     dst_addr: relay_addr,
                     dst_id: "relay".to_string(),
                     time: now(),
+                    btc_address: Some(address_hb.clone()),
                 };
                 let _ = socket_hb.send_msg(&msg, relay_addr).await;
             }
@@ -258,7 +261,7 @@ async fn handle_pay_command(
 ) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() != 2 {
-        eprintln!("Usage: /pay <peer_id> <montant>");
+        eprintln!("Usage: /pay <adresse_bitcoin> <montant>");
         return;
     }
     let dst_id = parts[0].trim();
@@ -348,7 +351,7 @@ async fn handle_incoming(
         }
 
         Message::Payment { src_id, dst_id, amount, payment_id } => {
-            if dst_id != my_id && dst_id != my_fingerprint {
+            if dst_id != my_id && dst_id != my_fingerprint && dst_id != state.btc_address {
                 return;
             }
             // Déduplication : un même paiement ne doit être crédité qu'une fois
@@ -380,7 +383,7 @@ async fn handle_incoming(
         }
 
         Message::PaymentAck { payment_id, from_id, to_id } => {
-            if to_id != my_id && to_id != my_fingerprint {
+            if to_id != my_id && to_id != my_fingerprint && to_id != state.btc_address {
                 return;
             }
             {

@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{Message, UdpSocketExt, Opts};
 use crate::identity::{load_or_generate_keypair, sign, verify, fingerprint};
 
-type PeersMap = Arc<Mutex<HashMap<SocketAddr, (String, u64)>>>; // addr → (peer_id, last_seen)
+type PeersMap = Arc<Mutex<HashMap<SocketAddr, (String, u64, Option<String>)>>>; // addr → (peer_id, last_seen, btc_address)
+type BtcMap = Arc<Mutex<HashMap<String, SocketAddr>>>; // btc_address → socket_addr
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -60,6 +61,7 @@ pub async fn main_relay(opts: Opts) {
     let public_key = signing_key.verifying_key().to_bytes().to_vec();
 
     let peers_list: PeersMap = Arc::new(Mutex::new(HashMap::new()));
+    let btc_map: BtcMap = Arc::new(Mutex::new(HashMap::new()));
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(10_000)));
 
     // Enregistrement auprès des autres relays
@@ -70,6 +72,7 @@ pub async fn main_relay(opts: Opts) {
             dst_addr: *peer_relay_addr,
             dst_id: "relay".to_string(),
             time: now(),
+            btc_address: None,  // Les relays n'ont pas d'adresse BTC
         };
         socket.send_msg(&msg, *peer_relay_addr).await.unwrap();
         println!("Registered with peer relay {}", peer_relay_addr);
@@ -89,6 +92,7 @@ pub async fn main_relay(opts: Opts) {
                     dst_addr: *peer_relay_addr,
                     dst_id: "relay".to_string(),
                     time: now(),
+                    btc_address: None,
                 };
                 let _ = socket_hb.send_msg(&msg, *peer_relay_addr).await;
             }
@@ -107,6 +111,7 @@ pub async fn main_relay(opts: Opts) {
     // Réception des messages
     let socket_rx = Arc::clone(&socket);
     let peers_rx = Arc::clone(&peers_list);
+    let btc_rx = Arc::clone(&btc_map);
     let seen_rx = Arc::clone(&seen_ids);
     tokio::spawn(async move {
         let mut buf = vec![0; 4096];
@@ -118,12 +123,19 @@ pub async fn main_relay(opts: Opts) {
                         Err(e) => { eprintln!("[ERROR] Deserialization failed: {}", e); continue; }
                     };
 
-                    if let Message::Register { src_id, time, .. } = &msg {
+                    if let Message::Register { src_id, time, btc_address, .. } = &msg {
                         peers_rx.lock().await
                             .entry(sender_addr)
-                            .and_modify(|(_, t)| *t = *time)
-                            .or_insert((src_id.clone(), *time));
-                        println!("[+] '{}' registered ({})", src_id, sender_addr);
+                            .and_modify(|(_, t, _)| *t = *time)
+                            .or_insert((src_id.clone(), *time, btc_address.clone()));
+
+                        // Si le peer a une adresse Bitcoin, on maintient la correspondance
+                        if let Some(btc_addr) = btc_address {
+                            btc_rx.lock().await.insert(btc_addr.clone(), sender_addr);
+                            println!("[+] '{}' registered ({}) [BTC: {}]", src_id, sender_addr, btc_addr);
+                        } else {
+                            println!("[+] '{}' registered ({})", src_id, sender_addr);
+                        }
                     }
 
                     if let Message::Classic { src_id, txt, time, msg_id, ttl, public_key, signature, .. } = &msg {
@@ -148,7 +160,23 @@ pub async fn main_relay(opts: Opts) {
 
                     if let Message::Payment { src_id, dst_id, amount, payment_id } = &msg {
                         println!("[Payment #{payment_id}] {src_id} → {dst_id} : {amount} sats");
-                        relay_message(&peers_rx, sender_addr, msg.clone(), &socket_rx).await;
+
+                        // Si dst_id est une adresse Bitcoin, on la résout
+                        if dst_id.starts_with('1') || dst_id.starts_with('3') || dst_id.starts_with("bc1") {
+                            let btc_locked = btc_rx.lock().await;
+                            if let Some(&peer_addr) = btc_locked.get(dst_id) {
+                                // On envoie directement au destinataire
+                                drop(btc_locked);
+                                let _ = socket_rx.send_msg(&msg, peer_addr).await;
+                            } else {
+                                // Peer pas trouvé localement, on propage aux autres relays
+                                drop(btc_locked);
+                                relay_to_peer_relays(&peers_rx, msg.clone(), &socket_rx).await;
+                            }
+                        } else {
+                            // dst_id est un peer_id ou fingerprint classique
+                            relay_message(&peers_rx, sender_addr, msg.clone(), &socket_rx).await;
+                        }
                     }
 
                     if let Message::PaymentAck { payment_id, from_id, to_id } = &msg {
@@ -158,7 +186,7 @@ pub async fn main_relay(opts: Opts) {
 
                     if let Message::AskForAddr { src_addr, peer_id, .. } = &msg {
                         let map = peers_rx.lock().await;
-                        if let Some((found_addr, _)) = map.iter().find(|(_, (id, _))| id == peer_id) {
+                        if let Some((found_addr, _)) = map.iter().find(|(_, (id, _, _))| id == peer_id) {
                             let reply = Message::PeerInfo { peer_addr: *found_addr, peer_id: peer_id.clone() };
                             drop(map);
                             let _ = socket_rx.send_msg(&reply, *src_addr).await;
@@ -211,10 +239,22 @@ async fn relay_message(peers: &PeersMap, sender_addr: SocketAddr, msg: Message, 
     }
 }
 
+// Propage un message uniquement aux autres relays (peer_id commençant par "relay:")
+async fn relay_to_peer_relays(peers: &PeersMap, msg: Message, socket: &UdpSocket) {
+    let peers_map = peers.lock().await;
+    for (other_addr, (peer_id, _, _)) in peers_map.iter() {
+        if peer_id.starts_with("relay:") {
+            if let Err(e) = socket.send_msg(&msg, *other_addr).await {
+                eprintln!("Failed to send to relay {}: {}", other_addr, e);
+            }
+        }
+    }
+}
+
 async fn delete_disconnected_peers(peers: &PeersMap) {
     let mut peers_map = peers.lock().await;
     let now = now();
-    peers_map.retain(|addr, (_, last_seen)| {
+    peers_map.retain(|addr, (_, last_seen, _)| {
         let active = now - *last_seen < 60;
         if !active { println!("[-] Peer {} disconnected (timeout)", addr); }
         active
