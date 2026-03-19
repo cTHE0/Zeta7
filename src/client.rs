@@ -179,7 +179,7 @@ pub async fn main_client(opts: Opts) {
                     Ok(Some(line)) => {
                         send_classic_message(
                             &line, &peer_id, &socket, &relay_addrs,
-                            local_addr, &signing_key, &public_key,
+                            local_addr, &signing_key, &public_key, &state,
                         ).await;
                     }
                     _ => break,
@@ -191,7 +191,7 @@ pub async fn main_client(opts: Opts) {
                     Some(UiCommand::SendMessage(text)) => {
                         send_classic_message(
                             &text, &peer_id, &socket, &relay_addrs,
-                            local_addr, &signing_key, &public_key,
+                            local_addr, &signing_key, &public_key, &state,
                         ).await;
                     }
                     Some(UiCommand::Pay { dst_id, amount }) => {
@@ -228,6 +228,7 @@ async fn send_classic_message(
     local_addr: SocketAddr,
     signing_key: &SigningKey,
     public_key: &[u8],
+    state: &Arc<AppState>,
 ) {
     let dst_addr = relay_addrs.first().copied().unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
     let time_val = now();
@@ -246,6 +247,16 @@ async fn send_classic_message(
         signature: sig,
     };
     send_to_all_relays(socket, &msg, relay_addrs).await;
+
+    // Ajouter le message envoyé dans l'UI
+    let fp = fingerprint(public_key);
+    state.push_message(ChatMessage {
+        from_id: format!("{} (vous)", peer_id),
+        fingerprint: fp,
+        text: text.to_string(),
+        timestamp: time_val,
+        msg_type: "message".to_string(),
+    }).await;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -303,9 +314,9 @@ async fn handle_pay_command(
     if any_success {
         println!("[Payment #{payment_id}] {amount} sats envoyés à {dst_id} (en attente de confirmation)");
         state.push_message(ChatMessage {
-            from_id: dst_id.to_string(),
+            from_id: format!("{} (vous)", my_id),
             fingerprint: String::new(),
-            text: amount.to_string(),
+            text: format!("{} → {}", amount, dst_id),
             timestamp: now(),
             msg_type: "payment_sent".to_string(),
         }).await;

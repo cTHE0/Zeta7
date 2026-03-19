@@ -91,13 +91,17 @@ input::placeholder{color:var(--text3)}
 /* ── Message ── */
 .mg{display:flex;gap:10px;padding:3px 0;margin-bottom:6px}
 .mg:hover .mt{opacity:1}
+.mg.sent{flex-direction:row-reverse}
+.mg.sent .mb{text-align:right}
 .av{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;
   justify-content:center;font-weight:700;font-size:11px;flex-shrink:0;margin-top:2px}
 .mb{flex:1;min-width:0}
 .mm{display:flex;align-items:baseline;gap:7px;margin-bottom:2px}
+.mg.sent .mm{flex-direction:row-reverse}
 .ma{font-weight:600;font-size:13.5px}
 .mfp{font-size:11px;color:var(--text3);font-family:monospace}
 .mt{font-size:11px;color:var(--text3);margin-left:auto;opacity:0;transition:opacity .15s}
+.mg.sent .mt{margin-left:0;margin-right:auto}
 .mx{font-size:14px;color:var(--text);line-height:1.55;word-break:break-word}
 
 /* ── Payment events ── */
@@ -264,7 +268,8 @@ function appendMsg(m,scroll=true){
   if(m.msg_type==='message'){
     const c=avatarColor(m.from_id);
     const ini=(m.from_id||'?').substring(0,2).toUpperCase();
-    el.className='mg';
+    const isSent=m.from_id.includes('(vous)');
+    el.className=isSent?'mg sent':'mg';
     el.innerHTML=`
       <div class="av" style="background:${c.bg};color:${c.fg}">${ini}</div>
       <div class="mb">
@@ -283,7 +288,13 @@ function appendMsg(m,scroll=true){
       html=`<strong>+${esc(m.text)} sats</strong> reçus de <strong>${esc(m.from_id)}</strong>`;
     } else if(m.msg_type==='payment_sent'){
       pc='pout';
-      html=`<strong>&#8722;${esc(m.text)} sats</strong> envoyés à <strong>${esc(m.from_id)}</strong>`;
+      // Le format du text est "montant → adresse_btc"
+      const parts=m.text.split('→').map(s=>s.trim());
+      if(parts.length===2){
+        html=`<strong>−${esc(parts[0])} sats</strong> envoyés à <strong>${esc(parts[1])}</strong>`;
+      }else{
+        html=`<strong>−${esc(m.text)} sats</strong> envoyés`;
+      }
     } else if(m.msg_type==='payment_ack'){
       html=`✓ Paiement confirmé par <strong>${esc(m.from_id)}</strong>`;
     }
@@ -346,6 +357,14 @@ function toast(msg,type='ok'){
 
 /* ── Init ── */
 loadInfo();loadMessages();connectSSE();
+
+// Rafraîchissement automatique toutes les 5 secondes
+setInterval(async()=>{
+  try{
+    const d=await(await fetch('/api/info')).json();
+    document.getElementById('balance').textContent=fmtSats(d.balance);
+  }catch(e){console.error(e)}
+},5000);
 </script>
 </body></html>"#;
 
